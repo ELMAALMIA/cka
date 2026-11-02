@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ckad-workload-sa
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: application-sa
+  namespace: ckad-workload-sa
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: application
+  namespace: ckad-workload-sa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: application
+  template:
+    metadata:
+      labels:
+        app: application
+    spec:
+      containers:
+        - name: application
+          image: nginx:1.25-alpine
+

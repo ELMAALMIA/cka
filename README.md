@@ -35,6 +35,12 @@ Use a fresh namespace for every lab. The setup manifests create the required nam
 | 09 | Create a 20% canary deployment | [`labs/09-canary-deployment`](labs/10-canary-deployment) |
 | 10 | Security context and capabilities | [`labs/10-security-context`](labs/10-security-context) |
 | 11 | NetworkPolicy | [`labs/11-network-policy`](labs/11-network-policy) |
+| 12 | Build and export a Docker image | [`labs/12-docker-image-export`](labs/12-docker-image-export) |
+| 13 | Diagnose and fix a ServiceAccount/RBAC issue | [`labs/13-serviceaccount-rbac`](labs/13-serviceaccount-rbac) |
+| 14 | Assign a ServiceAccount to a workload | [`labs/14-workload-serviceaccount`](labs/14-workload-serviceaccount) |
+| 15 | Update a liveness probe | [`labs/15-liveness-probe`](labs/15-liveness-probe) |
+| 16 | Expose a Deployment with NodePort | [`labs/16-nodeport-service`](labs/16-nodeport-service) |
+| 17 | Deployment CPU requests and limits | [`labs/17-deployment-resources`](labs/17-deployment-resources) |
 
 ## Exam habits
 
