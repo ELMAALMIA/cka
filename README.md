@@ -1,7 +1,7 @@
 # CKAD 2026 Exam Preparation Labs
 
 Seventeen hands-on labs covering common CKAD tasks. Each lab is self-contained and designed for command-line practice under time pressure.
-
+🎥 Complete video playlist with explanations: https://youtube.com/playlist?list=PLGPD0L7wWIvc&si=HuubJkB_8oq6_Sx2 
 ## Prerequisites
 
 - Kubernetes cluster (kind, minikube, Docker Desktop, or a remote practice cluster)
