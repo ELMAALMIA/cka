@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Helm, Kustomize, CRDs &amp; Images | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="tooling">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>Helm, Kustomize, CRDs &amp; Images</h1>
+  <p class="lead">Packaging and extending Kubernetes: Helm charts, Kustomize overlays, CustomResourceDefinitions and operators, and building container images. Related lab: 12.</p>
+
+  <h2>Helm</h2>
+  <p>A <strong>chart</strong> is a package of templates plus <code>values.yaml</code>. A <strong>release</strong> is an installed instance of a chart, with numbered <strong>revisions</strong>.</p>
+<pre><code>helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+helm search repo nginx
+helm show values bitnami/nginx &gt; values.yaml
+
+helm install web bitnami/nginx -n apps --create-namespace --set replicaCount=3
+helm install web bitnami/nginx -f values.yaml --version 18.1.0
+helm upgrade --install web bitnami/nginx -n apps -f values.yaml --atomic --wait
+helm list -A                       # -a to include failed/pending
+helm status web -n apps
+helm get values web -n apps        # user-supplied values
+helm get manifest web -n apps      # what was applied
+helm history web -n apps
+helm rollback web 2 -n apps
+helm uninstall web -n apps
+helm template web ./mychart        # render locally
+helm create mychart ; helm lint mychart</code></pre>
+  <p>Value precedence: chart defaults &lt; <code>-f</code> files (later files win) &lt; <code>--set</code>.</p>
+
+  <h2>Kustomize</h2>
+  <p>Built into kubectl. Template-free: a <strong>base</strong> of plain YAML plus <strong>overlays</strong> that patch it.</p>
+<pre><code>app/
+  base/
+    deployment.yaml
+    service.yaml
+    kustomization.yaml
+  overlays/
+    prod/
+      kustomization.yaml
+      replicas-patch.yaml</code></pre>
+<pre><code># base/kustomization.yaml
+resources:
+  - deployment.yaml
+  - service.yaml
+
+# overlays/prod/kustomization.yaml
+resources:
+  - ../../base
+namespace: prod
+namePrefix: prod-
+labels:
+  - pairs: { env: prod }
+    includeSelectors: true
+images:
+  - name: nginx
+    newTag: "1.25"
+replicas:
+  - name: web
+    count: 5
+patches:
+  - path: replicas-patch.yaml
+configMapGenerator:
+  - name: app-config
+    literals: [MODE=prod]</code></pre>
+<pre><code>kubectl kustomize overlays/prod      # print
+kubectl apply -k overlays/prod       # apply
+kubectl delete -k overlays/prod</code></pre>
+
+  <h2>CRDs and operators</h2>
+  <ul>
+    <li>A <strong>CustomResourceDefinition</strong> adds a new kind to the API (e.g. <code>Certificate</code>, <code>Backup</code>). It stores objects but does nothing by itself.</li>
+    <li>An <strong>operator</strong> is a controller that watches those objects and reconciles real resources. Usually installed with Helm or a manifest.</li>
+  </ul>
+<pre><code>kubectl get crd
+kubectl get crd certificates.cert-manager.io -o yaml
+kubectl api-resources --api-group=cert-manager.io
+kubectl explain certificate.spec
+kubectl get certificates -A</code></pre>
+<pre><code>apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: { name: backups.example.com }       # &lt;plural&gt;.&lt;group&gt;
+spec:
+  group: example.com
+  scope: Namespaced
+  names: { plural: backups, singular: backup, kind: Backup, shortNames: [bk] }
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                schedule: { type: string }</code></pre>
+
+  <h2>Container images</h2>
+<pre><code>FROM nginx:1.25-alpine
+COPY index.html /usr/share/nginx/html/index.html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]</code></pre>
+<pre><code>docker build -t web:1.0 .                     # or: podman build -t web:1.0 .
+docker images
+docker save web:1.0 -o /opt/web-1.0.tar      # lab 12: export to a tar file
+docker load -i /opt/web-1.0.tar
+docker tag web:1.0 registry.local/web:1.0 &amp;&amp; docker push registry.local/web:1.0
+sudo ctr -n k8s.io images import /opt/web-1.0.tar   # load into containerd on a node
+sudo crictl images</code></pre>
+  <table>
+    <tr><th>Dockerfile</th><th>Kubernetes field</th></tr>
+    <tr><td><code>ENTRYPOINT</code></td><td><code>command</code></td></tr>
+    <tr><td><code>CMD</code></td><td><code>args</code></td></tr>
+    <tr><td><code>ENV</code></td><td><code>env</code></td></tr>
+    <tr><td><code>EXPOSE</code></td><td><code>ports[].containerPort</code> (informational)</td></tr>
+    <tr><td><code>USER</code></td><td><code>securityContext.runAsUser</code></td></tr>
+  </table>
+  <p>Image pull policy: <code>Always</code> (default for <code>:latest</code> or no tag), <code>IfNotPresent</code> (default for other tags), <code>Never</code> (local images only).</p>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/tooling.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

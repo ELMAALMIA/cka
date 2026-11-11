@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deployments, Jobs &amp; Rollouts | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="workloads">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>Deployments, Jobs &amp; Rollouts</h1>
+  <p class="lead">Workload controllers and how to update them safely. Related labs: 02, 04, 05, 06, 09.</p>
+
+  <h2>Controller cheat sheet</h2>
+  <table>
+    <tr><th>Kind</th><th>Use it for</th><th>Key points</th></tr>
+    <tr><td>Deployment</td><td>Stateless apps</td><td>Manages ReplicaSets; rolling updates, rollback, scaling, pause/resume</td></tr>
+    <tr><td>ReplicaSet</td><td>Rarely used directly</td><td>Keeps N Pods matching a selector; adopts existing matching Pods</td></tr>
+    <tr><td>StatefulSet</td><td>Databases, queues</td><td>Stable names <code>web-0..n</code>, ordered start/stop, <code>volumeClaimTemplates</code>, headless Service</td></tr>
+    <tr><td>DaemonSet</td><td>Node agents (CNI, kube-proxy, log shippers)</td><td>One Pod per matching node, no <code>replicas</code>; needs tolerations for tainted nodes</td></tr>
+    <tr><td>Job</td><td>Run to completion</td><td><code>completions</code>, <code>parallelism</code>, <code>backoffLimit</code>, <code>activeDeadlineSeconds</code>, <code>ttlSecondsAfterFinished</code></td></tr>
+    <tr><td>CronJob</td><td>Scheduled Jobs</td><td><code>schedule</code>, <code>concurrencyPolicy</code>, <code>startingDeadlineSeconds</code>, history limits</td></tr>
+  </table>
+
+  <h2>Deployments</h2>
+<pre><code>kubectl create deployment web --image=nginx:1.24 --replicas=3 --port=80 --dry-run=client -o yaml &gt; deploy.yaml
+kubectl scale deployment web --replicas=5
+kubectl set image deployment/web nginx=nginx:1.25          # container=image
+kubectl annotate deployment/web kubernetes.io/change-cause="upgrade to 1.25"
+kubectl rollout status deployment/web
+kubectl rollout history deployment/web
+kubectl rollout history deployment/web --revision=2
+kubectl rollout undo deployment/web                        # previous revision
+kubectl rollout undo deployment/web --to-revision=1
+kubectl rollout pause deployment/web ; kubectl rollout resume deployment/web
+kubectl rollout restart deployment/web                     # re-roll all Pods (new env from ConfigMap, etc.)</code></pre>
+<pre><code>spec:
+  replicas: 5
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate            # or Recreate
+    rollingUpdate:
+      maxSurge: 25%                # extra Pods allowed above replicas
+      maxUnavailable: 25%          # Pods allowed to be missing
+  selector:
+    matchLabels: { app: web }      # immutable once created
+  template:
+    metadata:
+      labels: { app: web }         # must match selector
+    spec: { ... }</code></pre>
+  <ul>
+    <li>Every change to <code>spec.template</code> creates a new ReplicaSet and a new revision. Scaling does not.</li>
+    <li>The selector is <strong>immutable</strong>; changing it is rejected.</li>
+    <li>Rollback = scale the old ReplicaSet back up. Old ReplicaSets are kept up to <code>revisionHistoryLimit</code>.</li>
+    <li>Deprecated API versions (<code>extensions/v1beta1</code>, <code>apps/v1beta2</code>) must become <code>apps/v1</code>; <code>apps/v1</code> requires an explicit <code>selector</code> (lab 04).</li>
+  </ul>
+
+  <h2>Deployment strategies by hand</h2>
+  <ul>
+    <li><strong>Canary</strong> (lab 09): two Deployments share the label the Service selects (<code>app: storefront</code>) and differ on a second label (<code>track: stable|canary</code>). Traffic split ≈ ratio of ready Pods: 8 stable + 2 canary ≈ 80/20.</li>
+    <li><strong>Blue/green</strong>: two full-size Deployments with <code>version: blue|green</code>; flip the Service selector to switch all traffic at once.</li>
+    <li><strong>Recreate</strong>: downtime accepted, needed when two versions cannot coexist (schema locks, RWO volumes).</li>
+  </ul>
+
+  <h2>Jobs and CronJobs</h2>
+<pre><code>kubectl create job pi --image=perl:5.34 -- perl -Mbignum=bpi -wle 'print bpi(2000)'
+kubectl create cronjob backup --image=busybox:1.36 --schedule="*/30 * * * *" -- sh -c 'date; echo backup'
+kubectl create job manual-run --from=cronjob/backup
+kubectl get jobs,cronjobs ; kubectl logs job/pi</code></pre>
+<pre><code>apiVersion: batch/v1
+kind: CronJob
+metadata: { name: backup }
+spec:
+  schedule: "*/30 * * * *"           # min hour dom month dow
+  concurrencyPolicy: Forbid          # Allow | Forbid | Replace
+  startingDeadlineSeconds: 200       # skip run if it could not start within 200s
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  suspend: false
+  jobTemplate:
+    spec:
+      completions: 1
+      parallelism: 1
+      backoffLimit: 4                # retries before the Job is Failed
+      activeDeadlineSeconds: 600     # kill the Job after 10 min
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: OnFailure   # OnFailure or Never (never Always)
+          containers:
+            - name: backup
+              image: busybox:1.36
+              command: ["sh", "-c", "date; echo backup"]</code></pre>
+  <div class="callout">Cron fields: <code>minute hour day-of-month month day-of-week</code>. <code>*/5 * * * *</code> every 5 minutes, <code>0 2 * * *</code> daily at 02:00, <code>0 */6 * * *</code> every 6 hours, <code>30 9 * * 1-5</code> weekdays at 09:30.</div>
+
+  <h2>Scaling and autoscaling</h2>
+<pre><code>kubectl scale deployment web --replicas=3
+kubectl scale statefulset db --replicas=3
+kubectl autoscale deployment web --min=2 --max=10 --cpu-percent=80   # creates an HPA (needs metrics-server + CPU requests)
+kubectl get hpa</code></pre>
+
+  <h2>StatefulSet essentials</h2>
+<pre><code>apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: db }
+spec:
+  serviceName: db                 # headless Service (clusterIP: None) -&gt; db-0.db.ns.svc.cluster.local
+  replicas: 3
+  selector: { matchLabels: { app: db } }
+  template: { ... }
+  volumeClaimTemplates:           # one PVC per Pod: data-db-0, data-db-1, ...
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 1Gi } }</code></pre>
+  <p>Pods are created in order 0→n and deleted in reverse. PVCs are not deleted when the StatefulSet is deleted.</p>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/workloads.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

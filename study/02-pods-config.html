@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pods, ConfigMaps, Secrets &amp; Resources | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="pods">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>Pods, ConfigMaps, Secrets &amp; Resources</h1>
+  <p class="lead">The Pod spec is the heart of every workload. Learn the fields that exam tasks keep asking for: env, volumes, resources, init and sidecar containers. Related labs: 01, 03, 17.</p>
+
+  <h2>Pod anatomy</h2>
+<pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: web
+  labels: { app: web }
+spec:
+  restartPolicy: Always          # Always | OnFailure | Never
+  initContainers:
+    - name: wait-db
+      image: busybox:1.36
+      command: ["sh", "-c", "until nslookup db; do sleep 2; done"]
+    - name: log-shipper           # native sidecar: init container that keeps running
+      image: fluent/fluent-bit
+      restartPolicy: Always
+  containers:
+    - name: app
+      image: nginx:1.25
+      ports: [{ containerPort: 80 }]
+      env:
+        - name: MODE
+          value: "prod"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef: { name: db-creds, key: password }
+        - name: POD_IP
+          valueFrom:
+            fieldRef: { fieldPath: status.podIP }
+      envFrom:
+        - configMapRef: { name: app-config }
+      resources:
+        requests: { cpu: "250m", memory: "128Mi" }
+        limits:   { cpu: "500m", memory: "256Mi" }
+      volumeMounts:
+        - { name: config, mountPath: /etc/app, readOnly: true }
+        - { name: scratch, mountPath: /tmp }
+  volumes:
+    - name: config
+      configMap: { name: app-config }
+    - name: scratch
+      emptyDir: {}</code></pre>
+  <ul>
+    <li>Containers in a Pod share the <strong>network namespace</strong> (one IP, talk over <code>localhost</code>) and can share <strong>volumes</strong>. Filesystems are separate.</li>
+    <li><code>command</code> overrides the image <code>ENTRYPOINT</code>, <code>args</code> overrides <code>CMD</code>.</li>
+    <li><strong>Init containers</strong> run one by one to completion before app containers. A <strong>native sidecar</strong> is an init container with <code>restartPolicy: Always</code> (GA since 1.33).</li>
+    <li>Multi-container patterns: sidecar (logging, proxy), ambassador (outbound proxy), adapter (reformat output).</li>
+  </ul>
+
+  <h2>ConfigMaps</h2>
+<pre><code>kubectl create configmap app-config --from-literal=MODE=prod --from-file=app.conf
+kubectl create configmap app-config --from-env-file=.env
+kubectl get cm app-config -o yaml</code></pre>
+  <table>
+    <tr><th>Consumption</th><th>Field</th><th>Updates live?</th></tr>
+    <tr><td>All keys as env vars</td><td><code>envFrom[].configMapRef</code></td><td>No</td></tr>
+    <tr><td>One key as env var</td><td><code>env[].valueFrom.configMapKeyRef</code></td><td>No</td></tr>
+    <tr><td>Files in a directory</td><td><code>volumes[].configMap</code> + <code>volumeMounts</code></td><td>Yes (eventually)</td></tr>
+    <tr><td>Single file via <code>subPath</code></td><td><code>volumeMounts[].subPath</code></td><td>No</td></tr>
+  </table>
+  <p>Use <code>items</code> to select keys and rename files, <code>optional: true</code> to tolerate a missing ConfigMap, <code>immutable: true</code> to freeze it.</p>
+
+  <h2>Secrets</h2>
+<pre><code>kubectl create secret generic db-creds --from-literal=database=inventory --from-literal=password='s3cret'
+kubectl create secret tls web-tls --cert=tls.crt --key=tls.key
+kubectl create secret docker-registry regcred --docker-server=registry.io --docker-username=u --docker-password=p
+kubectl get secret db-creds -o jsonpath='{.data.password}' | base64 -d</code></pre>
+  <ul>
+    <li><code>data</code> values are <strong>base64-encoded, not encrypted</strong>. <code>stringData</code> accepts plain text in YAML.</li>
+    <li>Types: <code>Opaque</code> (generic), <code>kubernetes.io/tls</code>, <code>kubernetes.io/dockerconfigjson</code>, <code>kubernetes.io/service-account-token</code>, <code>kubernetes.io/basic-auth</code>.</li>
+    <li>Consume exactly like ConfigMaps: <code>secretKeyRef</code>, <code>envFrom[].secretRef</code>, <code>volumes[].secret.secretName</code>.</li>
+    <li>Private registry: <code>spec.imagePullSecrets: [{name: regcred}]</code> or attach it to the ServiceAccount.</li>
+  </ul>
+  <div class="callout warn"><strong>Lab 01 gotcha:</strong> <code>kubectl set env --from=secret/x</code> uses the Secret key names as the variable names. When the task needs different names, edit the Deployment and use <code>secretKeyRef</code>.</div>
+
+  <h2>Resources, QoS, LimitRange, ResourceQuota</h2>
+  <ul>
+    <li><strong>requests</strong>: reserved for scheduling. <strong>limits</strong>: enforced at runtime. CPU over the limit is throttled; memory over the limit is <strong>OOMKilled</strong> (exit code 137).</li>
+    <li>Units: CPU <code>1</code> = 1 core = <code>1000m</code>. Memory <code>Mi</code>/<code>Gi</code> (binary) vs <code>M</code>/<code>G</code> (decimal).</li>
+    <li><strong>QoS</strong>: Guaranteed (requests = limits for CPU and memory in every container), Burstable (something set), BestEffort (nothing set). Eviction order under node pressure: BestEffort → Burstable → Guaranteed.</li>
+    <li><strong>LimitRange</strong> (per namespace): default requests/limits injected into containers, plus min/max per container or Pod. Admission rejects Pods outside the bounds.</li>
+    <li><strong>ResourceQuota</strong> (per namespace): caps the total (<code>requests.cpu</code>, <code>limits.memory</code>, <code>pods</code>, <code>persistentvolumeclaims</code>, ...). When a quota covers a resource, Pods must set it, or a LimitRange default must exist.</li>
+  </ul>
+<pre><code>apiVersion: v1
+kind: LimitRange
+metadata: { name: defaults, namespace: team-a }
+spec:
+  limits:
+    - type: Container
+      default:        { cpu: "500m", memory: "256Mi" }   # default limits
+      defaultRequest: { cpu: "100m", memory: "128Mi" }   # default requests
+      max:            { cpu: "1",    memory: "1Gi" }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: { name: team-quota, namespace: team-a }
+spec:
+  hard: { requests.cpu: "4", requests.memory: "8Gi", limits.cpu: "8", pods: "20" }</code></pre>
+<pre><code>kubectl set resources deployment web --requests=cpu=100m,memory=128Mi --limits=cpu=500m,memory=256Mi
+kubectl describe quota -n team-a
+kubectl describe limitrange -n team-a
+kubectl top pod -n team-a            # needs metrics-server</code></pre>
+
+  <h2>Handy Pod commands</h2>
+<pre><code>kubectl run nginx --image=nginx --port=80 --labels=app=web --dry-run=client -o yaml &gt; pod.yaml
+kubectl run tmp --image=busybox:1.36 --rm -it --restart=Never -- sh
+kubectl run tmp --image=busybox:1.36 --rm -it --restart=Never -- wget -qO- http://web
+kubectl exec -it web -c app -- sh
+kubectl cp web:/var/log/app.log ./app.log
+kubectl get pod web -o jsonpath='{.spec.containers[*].image}'
+kubectl replace --force -f pod.yaml    # recreate when a field is immutable</code></pre>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/pods.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mock exam | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="mock">
+<header class="top"></header>
+<div class="mock-head">
+  <h1>Mock exam</h1>
+  <p class="lead">Random questions from all twelve topics, against the clock. When time runs out your answers are checked automatically, and the result shows which topics to review.</p>
+</div>
+<main class="mock">
+  <form class="panel" id="setup">
+    <fieldset class="option-group">
+      <legend>Number of questions</legend>
+      <div class="seg-ctl">
+        <label><input type="radio" name="count" value="20"><span>20</span></label>
+        <label><input type="radio" name="count" value="30" checked><span>30</span></label>
+        <label><input type="radio" name="count" value="50"><span>50</span></label>
+        <label><input type="radio" name="count" value="999"><span>All</span></label>
+      </div>
+    </fieldset>
+    <fieldset class="option-group">
+      <legend>Time limit</legend>
+      <div class="seg-ctl">
+        <label><input type="radio" name="minutes" value="15"><span>15 min</span></label>
+        <label><input type="radio" name="minutes" value="30" checked><span>30 min</span></label>
+        <label><input type="radio" name="minutes" value="60"><span>60 min</span></label>
+        <label><input type="radio" name="minutes" value="0"><span>No limit</span></label>
+      </div>
+    </fieldset>
+    <fieldset class="option-group">
+      <legend>Exam</legend>
+      <div class="seg-ctl">
+        <label><input type="radio" name="focus" value="all" checked><span>Both</span></label>
+        <label><input type="radio" name="focus" value="CKA"><span>CKA</span></label>
+        <label><input type="radio" name="focus" value="CKAD"><span>CKAD</span></label>
+      </div>
+    </fieldset>
+    <div class="foot">
+      <button class="btn primary" type="submit">Start the mock exam</button>
+      <p id="bank-info"></p>
+    </div>
+  </form>
+
+  <div id="exam" hidden>
+    <div class="exam-bar">
+      <span class="timer" id="timer" aria-live="off">--:--</span>
+      <span class="answered" id="answered"></span>
+      <button class="btn quiet" id="abort" type="button">Leave exam</button>
+    </div>
+    <div id="result" hidden>
+      <h2 style="margin-bottom:12px">Score by topic</h2>
+      <div class="table-wrap"><table class="breakdown"><thead><tr><th>Topic</th><th>Correct</th></tr></thead><tbody id="breakdown"></tbody></table></div>
+      <p style="display:flex;gap:12px;flex-wrap:wrap;margin:20px 0 48px"><button class="btn primary" id="again" type="button">Start a new mock exam</button><a class="btn" href="index.html">Back to topics</a></p>
+      <h2 style="margin-bottom:20px">Your answers</h2>
+    </div>
+    <div id="quiz"></div>
+  </div>
+</main>
+
+<script src="questions/architecture.js"></script>
+<script src="questions/pods.js"></script>
+<script src="questions/workloads.js"></script>
+<script src="questions/scheduling.js"></script>
+<script src="questions/networking.js"></script>
+<script src="questions/storage.js"></script>
+<script src="questions/security.js"></script>
+<script src="questions/observability.js"></script>
+<script src="questions/maintenance.js"></script>
+<script src="questions/troubleshoot.js"></script>
+<script src="questions/tooling.js"></script>
+<script src="questions/exam.js"></script>
+<script src="assets/app.js"></script>
+<script>
+(function () {
+  var S = window.Study, banks = window.QUIZ_BANKS || {}, timerId = null, deadline = 0, graded = false;
+  var $ = function (id) { return document.getElementById(id); };
+  var setup = $('setup');
+
+  function pool(focus) {
+    var out = [];
+    S.TOPICS.forEach(function (t) {
+      if (focus !== 'all' && t.exams.indexOf(focus) < 0) return;
+      (banks[t.id] || []).forEach(function (q) { var c = {}; for (var k in q) c[k] = q[k]; c._topic = t.title; out.push(c); });
+    });
+    return out;
+  }
+  function shuffle(a) { for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)), t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
+  function val(name) { return setup.querySelector('input[name="' + name + '"]:checked').value; }
+  function info() { var n = pool(val('focus')).length; $('bank-info').textContent = n + ' questions available for this selection.'; }
+  setup.addEventListener('change', info); info();
+
+  function tick() {
+    var left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    $('timer').textContent = S.pad2(Math.floor(left / 60)) + ':' + S.pad2(left % 60);
+    $('timer').classList.toggle('low', left <= 120);
+    if (left <= 0 && !graded) { clearInterval(timerId); $('quiz').querySelector('form').requestSubmit(); }
+  }
+  function setAnswered(n, total) { $('answered').textContent = n + ' of ' + total + ' answered'; }
+
+  setup.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var n = +val('count'), mins = +val('minutes');
+    banks.__mock = shuffle(pool(val('focus'))).slice(0, n);
+    graded = false;
+    setup.hidden = true; document.querySelector('.mock-head').hidden = true; $('result').hidden = true; $('exam').hidden = false;
+    S.renderQuiz('__mock', 'quiz', { showTopic: true, noSave: true, onGraded: finish, onChange: setAnswered });
+    setAnswered(0, banks.__mock.length);
+    if (timerId) clearInterval(timerId);
+    if (mins > 0) { deadline = Date.now() + mins * 60000; tick(); timerId = setInterval(tick, 1000); }
+    else { $('timer').textContent = 'No limit'; }
+    window.scrollTo(0, 0);
+  });
+
+  function finish(r) {
+    graded = true; if (timerId) clearInterval(timerId);
+    $('abort').hidden = true;
+    $('timer').classList.remove('low');
+    $('timer').textContent = r.pct + '%';
+    $('answered').textContent = 'Exam finished. ' + r.correct + ' of ' + r.total + ' correct.';
+    var p = S.loadProgress(), prev = p.mock || {};
+    p.mock = { best: Math.max(prev.best || 0, r.pct), last: r.pct, attempts: (prev.attempts || 0) + 1, at: Date.now() };
+    S.saveProgress(p);
+    var tb = $('breakdown'); tb.innerHTML = '';
+    Object.keys(r.perTopic).sort(function (a, b) {
+      return r.perTopic[a].ok / r.perTopic[a].n - r.perTopic[b].ok / r.perTopic[b].n;
+    }).forEach(function (t) {
+      var x = r.perTopic[t], pct = Math.round(100 * x.ok / x.n), tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + S.esc(t) + '</td><td><span class="score-text ' + S.band(pct) + '">' + x.ok + ' of ' + x.n + '</span></td>';
+      tb.appendChild(tr);
+    });
+    var result = $('result'); result.hidden = false;
+    $('quiz').querySelector('.result').after(result);
+  }
+  $('again').addEventListener('click', function () { location.reload(); });
+  $('abort').addEventListener('click', function () {
+    if (confirm('Leave this mock exam? Your answers will not be saved.')) location.reload();
+  });
+})();
+</script>
+</body>
+</html>

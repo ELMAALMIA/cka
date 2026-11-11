@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Imperative kubectl &amp; Exam Strategy | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="exam">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>Imperative kubectl &amp; Exam Strategy</h1>
+  <p class="lead">Speed decides the CKA and CKAD. This page collects the shell setup, the imperative commands worth memorising, and a plan for the two hours.</p>
+
+  <h2>Exam format</h2>
+  <table>
+    <tr><th></th><th>CKA</th><th>CKAD</th></tr>
+    <tr><td>Duration</td><td>2 hours</td><td>2 hours</td></tr>
+    <tr><td>Format</td><td colspan="2">15–20 hands-on tasks in a remote Linux desktop, several clusters, partial credit</td></tr>
+    <tr><td>Passing score</td><td colspan="2">66%</td></tr>
+    <tr><td>Allowed docs</td><td colspan="2">kubernetes.io/docs, kubernetes.io/blog, and docs of curriculum tools such as Helm</td></tr>
+    <tr><td>Biggest domains</td><td>Troubleshooting 30%, Cluster architecture/installation 25%, Services &amp; networking 20%</td><td>App environment, config &amp; security 25%, App design &amp; build 20%, Services &amp; networking 20%</td></tr>
+  </table>
+
+  <h2>First two minutes: shell setup</h2>
+<pre><code>alias k=kubectl                                  # often already set
+source &lt;(kubectl completion bash); complete -o default -F __start_kubectl k
+export do="--dry-run=client -o yaml"
+export now="--force --grace-period=0"
+cat &gt;&gt; ~/.vimrc &lt;&lt;'EOF'
+set expandtab tabstop=2 shiftwidth=2
+EOF</code></pre>
+
+  <h2>Imperative commands to know by heart</h2>
+<pre><code>k run web --image=nginx --port=80 --labels=app=web $do &gt; pod.yaml
+k run web --image=nginx --port=80 --expose               # Pod + Service
+k run tmp --image=busybox:1.36 --rm -it --restart=Never -- sh
+k create deployment web --image=nginx --replicas=3 --port=80 $do &gt; deploy.yaml
+k expose deployment web --port=80 --target-port=8080 --type=NodePort --name=web-svc
+k create service clusterip db --tcp=5432:5432
+k create configmap cfg --from-literal=k=v --from-file=app.conf
+k create secret generic s --from-literal=password=x
+k create job j --image=busybox:1.36 -- date
+k create cronjob cj --image=busybox:1.36 --schedule="*/30 * * * *" -- date
+k create ingress ing --class=nginx --rule="a.com/=web:80"
+k create sa app-sa
+k create role r --verb=get,list --resource=pods
+k create rolebinding rb --role=r --serviceaccount=ns:app-sa
+k create quota q --hard=pods=10,requests.cpu=2
+k create priorityclass high --value=1000
+k create token app-sa
+
+k scale deployment web --replicas=5
+k set image deployment/web nginx=nginx:1.25
+k set resources deployment web --requests=cpu=100m --limits=cpu=200m
+k set env deployment/web MODE=prod
+k set serviceaccount deployment/web app-sa
+k label pod web tier=frontend ; k label pod web tier-
+k annotate pod web note=hello
+k autoscale deployment web --min=2 --max=5 --cpu-percent=70
+k rollout status|history|undo|restart deployment/web</code></pre>
+
+  <h2>Reading and filtering output</h2>
+<pre><code>k get pods -A -o wide --show-labels
+k get pods -l app=web,tier!=db
+k get pods --field-selector=status.phase=Running,spec.nodeName=w1
+k get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIP}{"\n"}{end}'
+k get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'
+k get pods -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image
+k get pv --sort-by=.spec.capacity.storage
+k explain pod.spec.containers.livenessProbe --recursive | less</code></pre>
+
+  <h2>Editing objects quickly</h2>
+  <ul>
+    <li><code>k edit deploy web</code> for small changes to controllers.</li>
+    <li>Pods are mostly immutable. <code>k edit pod</code> saves a copy in <code>/tmp</code> on failure, then run <code>k replace --force -f /tmp/kubectl-edit-*.yaml</code>.</li>
+    <li><code>k get deploy web -o yaml &gt; web.yaml</code>, edit, <code>k apply -f web.yaml</code> when the change is large.</li>
+    <li><code>k patch deploy web -p '{"spec":{"replicas":3}}'</code> for scripted one-liners.</li>
+  </ul>
+
+  <h2>Time strategy</h2>
+  <ol>
+    <li>Read the task weight. Do every task in one quick pass; flag anything that takes more than about 7 minutes and come back later.</li>
+    <li>Always run the <code>kubectl config use-context</code> line given in the task and set the namespace.</li>
+    <li>Generate YAML imperatively, then edit. Copy snippets from kubernetes.io only for things kubectl cannot generate (PV, PVC, NetworkPolicy, probes, securityContext).</li>
+    <li>Verify every task: <code>get -o yaml</code>, <code>rollout status</code>, a test Pod with <code>wget</code> or <code>nslookup</code>.</li>
+    <li>Respect constraints like "do not modify X". Write output files to the exact path asked.</li>
+    <li>On tasks that need <code>ssh</code> to a node, remember to <code>exit</code> back to the base host afterwards.</li>
+  </ol>
+
+  <h2>Map this repo's labs to the exam</h2>
+  <table>
+    <tr><th>Labs</th><th>Topic page</th></tr>
+    <tr><td>01, 03, 17</td><td><a href="02-pods-config.html">Pods, ConfigMaps, Secrets &amp; Resources</a></td></tr>
+    <tr><td>02, 04, 05, 06, 09</td><td><a href="03-workloads.html">Deployments, Jobs &amp; Rollouts</a></td></tr>
+    <tr><td>07, 08, 11, 16</td><td><a href="05-networking.html">Services, Ingress &amp; NetworkPolicy</a></td></tr>
+    <tr><td>10, 13, 14</td><td><a href="07-security.html">RBAC, ServiceAccounts &amp; Security</a></td></tr>
+    <tr><td>15</td><td><a href="08-observability.html">Probes, Logs &amp; Debugging</a></td></tr>
+    <tr><td>12</td><td><a href="11-helm-kustomize.html">Helm, Kustomize, CRDs &amp; Images</a></td></tr>
+  </table>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/exam.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

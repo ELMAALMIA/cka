@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>kubeadm, Upgrades &amp; etcd Backup | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="maintenance">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA</span>
+  <h1>kubeadm, Upgrades &amp; etcd Backup</h1>
+  <p class="lead">Install a cluster, add nodes, upgrade one minor version, renew certificates and back up / restore etcd. These tasks are almost guaranteed on the CKA.</p>
+
+  <h2>Node prerequisites</h2>
+<pre><code># kernel modules and sysctl
+cat &lt;&lt;EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+sudo modprobe overlay &amp;&amp; sudo modprobe br_netfilter
+cat &lt;&lt;EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+sudo sysctl --system
+sudo swapoff -a                                    # and remove swap from /etc/fstab
+
+# containerd with systemd cgroups
+containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
+
+# packages (repo per minor version on pkgs.k8s.io)
+sudo apt-get install -y kubelet kubeadm kubectl &amp;&amp; sudo apt-mark hold kubelet kubeadm kubectl</code></pre>
+
+  <h2>Create the cluster</h2>
+<pre><code>sudo kubeadm init --pod-network-cidr=10.244.0.0/16 \
+  --apiserver-advertise-address=192.168.56.10 \
+  --control-plane-endpoint=k8s-api.local          # needed for a future HA control plane
+mkdir -p $HOME/.kube &amp;&amp; sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config &amp;&amp; sudo chown $(id -u):$(id -g) $HOME/.kube/config
+kubectl apply -f &lt;cni-manifest.yaml&gt;               # nodes stay NotReady until a CNI is installed
+
+# on the control plane, print a join command (tokens live 24h)
+kubeadm token create --print-join-command
+# on each worker
+sudo kubeadm join 192.168.56.10:6443 --token abc.def --discovery-token-ca-cert-hash sha256:...</code></pre>
+  <p>Defaults: Service CIDR <code>10.96.0.0/12</code>, DNS domain <code>cluster.local</code>. <code>kubeadm reset</code> undoes init/join on a node.</p>
+
+  <h2>Upgrade one minor version</h2>
+  <div class="callout">Rule: one minor at a time, control plane first, then workers one by one. kubeadm before kubelet.</div>
+  <h3>Control-plane node</h3>
+<pre><code># 1. point apt at the new minor repo, then
+sudo apt-mark unhold kubeadm &amp;&amp; sudo apt-get update &amp;&amp; sudo apt-get install -y kubeadm='1.35.1-*' &amp;&amp; sudo apt-mark hold kubeadm
+kubeadm version
+sudo kubeadm upgrade plan
+sudo kubeadm upgrade apply v1.35.1               # other control-plane nodes: sudo kubeadm upgrade node
+
+# 2. kubelet and kubectl
+kubectl drain cp1 --ignore-daemonsets
+sudo apt-mark unhold kubelet kubectl &amp;&amp; sudo apt-get install -y kubelet='1.35.1-*' kubectl='1.35.1-*' &amp;&amp; sudo apt-mark hold kubelet kubectl
+sudo systemctl daemon-reload &amp;&amp; sudo systemctl restart kubelet
+kubectl uncordon cp1</code></pre>
+  <h3>Each worker</h3>
+<pre><code>kubectl drain w1 --ignore-daemonsets --delete-emptydir-data     # from the control plane
+# on w1:
+sudo apt-get install -y kubeadm='1.35.1-*'
+sudo kubeadm upgrade node
+sudo apt-get install -y kubelet='1.35.1-*' kubectl='1.35.1-*'
+sudo systemctl daemon-reload &amp;&amp; sudo systemctl restart kubelet
+kubectl uncordon w1                                              # from the control plane
+kubectl get nodes                                                # VERSION column</code></pre>
+  <p>Version skew: kubelet may be up to three minors older than the API server, never newer. kubectl ±1 minor.</p>
+
+  <h2>etcd backup and restore</h2>
+  <p>Take the endpoints and certificate paths from <code>/etc/kubernetes/manifests/etcd.yaml</code> (<code>--listen-client-urls</code>, <code>--cert-file</code>, <code>--key-file</code>, <code>--trusted-ca-file</code>).</p>
+<pre><code># backup
+ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  snapshot save /opt/backup/etcd-snap.db
+etcdutl snapshot status /opt/backup/etcd-snap.db --write-out=table
+
+# restore (offline operation, no certificates needed)
+etcdutl snapshot restore /opt/backup/etcd-snap.db --data-dir=/var/lib/etcd-restore
+# older tools: ETCDCTL_API=3 etcdctl snapshot restore ... --data-dir=/var/lib/etcd-restore
+
+# point etcd at the restored data
+sudo vi /etc/kubernetes/manifests/etcd.yaml
+#   volumes:
+#   - hostPath: { path: /var/lib/etcd-restore, type: DirectoryOrCreate }
+#     name: etcd-data
+# the kubelet recreates the etcd Pod; the API server reconnects (give it a minute)
+kubectl get pods -A</code></pre>
+  <div class="callout warn"><strong>Common mistakes:</strong> forgetting the TLS flags on save, using http instead of https, changing <code>--data-dir</code> in the command line but not the hostPath (or the reverse), and leaving the restore directory owned by the wrong user.</div>
+
+  <h2>Certificates</h2>
+<pre><code>sudo kubeadm certs check-expiration
+sudo kubeadm certs renew all          # then restart control-plane static Pods (move manifests out and back, or restart kubelet)
+openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text | grep -A1 -E 'Not After|Alternative'</code></pre>
+  <p>The cluster CA is valid for 10 years; leaf certificates for 1 year and are renewed by every <code>kubeadm upgrade</code>.</p>
+
+  <h2>HA control plane (concepts)</h2>
+  <ul>
+    <li>Stacked etcd (etcd on each control-plane node) vs external etcd cluster.</li>
+    <li>A load balancer in front of the API servers; <code>--control-plane-endpoint</code> points at it.</li>
+    <li>Add control-plane nodes with <code>kubeadm join ... --control-plane --certificate-key ...</code> (key from <code>kubeadm init phase upload-certs --upload-certs</code>).</li>
+    <li>etcd needs an odd number of members (3 or 5) to keep quorum.</li>
+  </ul>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/maintenance.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

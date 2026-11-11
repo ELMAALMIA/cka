@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Storage: Volumes, PV, PVC | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="storage">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>Storage: Volumes, PV, PVC</h1>
+  <p class="lead">Ephemeral volumes, the PersistentVolume / PersistentVolumeClaim contract, StorageClasses and the binding rules the exam loves to test.</p>
+
+  <h2>Volume types you must know</h2>
+  <table>
+    <tr><th>Type</th><th>Lifetime</th><th>Typical use</th></tr>
+    <tr><td><code>emptyDir</code></td><td>Pod (survives container restarts)</td><td>Scratch space shared between containers. <code>medium: Memory</code> for tmpfs, <code>sizeLimit</code></td></tr>
+    <tr><td><code>hostPath</code></td><td>Node</td><td>Node agents, labs. Insecure; blocked by the restricted PSS</td></tr>
+    <tr><td><code>configMap</code> / <code>secret</code> / <code>downwardAPI</code> / <code>projected</code></td><td>Pod</td><td>Config files, credentials, Pod metadata</td></tr>
+    <tr><td><code>persistentVolumeClaim</code></td><td>Independent of the Pod</td><td>Real data</td></tr>
+    <tr><td><code>nfs</code>, <code>csi</code>, cloud disks</td><td>External</td><td>Usually behind a PV, not inline</td></tr>
+  </table>
+
+  <h2>PV and PVC</h2>
+  <ul>
+    <li><strong>PersistentVolume</strong> (cluster-scoped): a piece of storage, created by an admin (static) or by a provisioner (dynamic).</li>
+    <li><strong>PersistentVolumeClaim</strong> (namespaced): a request for storage. Pods mount PVCs, never PVs.</li>
+    <li>Binding is one-to-one. A PVC binds to a PV when: capacity ≥ request, requested access modes are offered, <code>storageClassName</code> matches, optional <code>selector</code> matches. A 1Gi claim can bind a 5Gi PV; the extra space is "wasted".</li>
+  </ul>
+<pre><code>apiVersion: v1
+kind: PersistentVolume
+metadata: { name: pv-data }
+spec:
+  capacity: { storage: 5Gi }
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain      # Retain | Delete (| Recycle, deprecated)
+  storageClassName: manual
+  hostPath: { path: /mnt/data }              # or nfs:, csi:, ...
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: data-pvc }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: manual                   # "" = no dynamic provisioning, omitted = default class
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: app }
+spec:
+  containers:
+    - name: app
+      image: nginx
+      volumeMounts: [{ name: data, mountPath: /usr/share/nginx/html }]
+  volumes:
+    - name: data
+      persistentVolumeClaim: { claimName: data-pvc }</code></pre>
+
+  <h3>Access modes</h3>
+  <table>
+    <tr><th>Mode</th><th>Short</th><th>Meaning</th></tr>
+    <tr><td>ReadWriteOnce</td><td>RWO</td><td>Read-write by a single <strong>node</strong> (many Pods on that node)</td></tr>
+    <tr><td>ReadOnlyMany</td><td>ROX</td><td>Read-only by many nodes</td></tr>
+    <tr><td>ReadWriteMany</td><td>RWX</td><td>Read-write by many nodes (NFS, CephFS, EFS...)</td></tr>
+    <tr><td>ReadWriteOncePod</td><td>RWOP</td><td>Read-write by a single <strong>Pod</strong></td></tr>
+  </table>
+
+  <h3>PV phases and reclaim policies</h3>
+  <ul>
+    <li>Phases: <code>Available</code> → <code>Bound</code> → <code>Released</code> (claim deleted, data kept) → <code>Failed</code>.</li>
+    <li><code>Retain</code>: PV stays Released with data; to reuse, edit the PV and delete <code>spec.claimRef</code>.</li>
+    <li><code>Delete</code>: PV and backing storage removed with the PVC (default for dynamic provisioning).</li>
+    <li>A PVC in use by a Pod is protected from deletion (finalizer <code>kubernetes.io/pvc-protection</code>) until the Pod goes away.</li>
+  </ul>
+
+  <h2>StorageClass and dynamic provisioning</h2>
+<pre><code>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com            # rancher.io/local-path, kubernetes.io/no-provisioner ...
+parameters: { type: gp3 }
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer # or Immediate
+allowVolumeExpansion: true</code></pre>
+  <ul>
+    <li><code>WaitForFirstConsumer</code>: the PVC stays Pending until a Pod uses it, so the volume is created in the Pod's zone. Not a bug.</li>
+    <li><code>kubernetes.io/no-provisioner</code> is used for <strong>local</strong> volumes with pre-created PVs and <code>nodeAffinity</code>.</li>
+    <li>Expansion: class must have <code>allowVolumeExpansion: true</code> and the driver must support it. Edit <code>spec.resources.requests.storage</code> on the PVC. Shrinking is impossible.</li>
+  </ul>
+<pre><code>kubectl get sc
+kubectl get pv,pvc -A
+kubectl describe pvc data-pvc            # events explain Pending
+kubectl get pv --sort-by=.spec.capacity.storage
+kubectl patch pv pv-data -p '{"spec":{"claimRef":null}}'     # make a Released PV Available again</code></pre>
+
+  <h2>Mount options worth knowing</h2>
+<pre><code>volumeMounts:
+  - name: config
+    mountPath: /etc/nginx/nginx.conf
+    subPath: nginx.conf        # single file, hides nothing else; no live updates
+    readOnly: true
+securityContext:
+  fsGroup: 2000                # files in the volume owned by group 2000, writable by it</code></pre>
+
+  <h2>Troubleshooting checklist</h2>
+  <ul>
+    <li>PVC Pending: no PV matches (size, access mode, class name typo), no default StorageClass, provisioner Pod down, or WaitForFirstConsumer.</li>
+    <li>Pod stuck ContainerCreating with <code>FailedMount</code>: PVC not bound, RWO volume already attached to another node, NFS server unreachable, wrong path.</li>
+    <li>Permission denied inside the container: set <code>fsGroup</code> or <code>runAsUser</code> to match the volume ownership.</li>
+  </ul>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/storage.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

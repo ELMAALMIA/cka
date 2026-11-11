@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>K8s Study | CKA and CKAD preparation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="home">
+<header class="top"></header>
+<main class="home">
+  <section class="hero">
+    <div>
+      <h1>Steer your cluster through the CKA and CKAD.</h1>
+      <p class="lead">Twelve lessons cover both curricula, from etcd backups to NetworkPolicies. Each lesson ends with a quiz that explains every answer. The wheel fills in as you master each topic.</p>
+      <div class="actions">
+        <a class="btn primary" id="continue" href="01-architecture.html">Start topic 1</a>
+        <a class="btn" href="mock-exam.html">Take a mock exam</a>
+      </div>
+    </div>
+    <figure class="helm">
+      <svg id="dial" viewBox="0 0 400 400" role="img" aria-labelledby="dial-title"><title id="dial-title">Mastery of the twelve topics</title></svg>
+      <figcaption>
+        <ul class="legend">
+          <li><i style="background:var(--go)"></i>80% or more</li>
+          <li><i style="background:var(--signal)"></i>50 to 79%</li>
+          <li><i style="background:var(--stop)"></i>Below 50%</li>
+          <li><i style="background:var(--seg-empty)"></i>Not taken</li>
+        </ul>
+      </figcaption>
+    </figure>
+  </section>
+
+  <div class="section-head">
+    <h2>Topics</h2>
+    <p id="summary">Work through them in order. Each takes about 30 minutes.</p>
+  </div>
+  <ol class="topic-list" id="list"></ol>
+
+  <section class="guide">
+    <div>
+      <h2>How to study with this guide</h2>
+      <ol class="steps">
+        <li>Read a lesson once, then take its quiz without scrolling back. Aim for 80% before moving on.</li>
+        <li>For every wrong answer, read the explanation and run the command on a real cluster such as kind, minikube or a kubeadm VM.</li>
+        <li>Pair each topic with the matching hands-on lab in this repository's <code>labs</code> folder. The last topic lists which lab goes with which topic.</li>
+        <li>Once every segment of the wheel is green, take the mock exam until you pass it comfortably.</li>
+      </ol>
+    </div>
+    <div class="callout warn">
+      <strong>The real exams are hands-on.</strong>
+      The CKA and CKAD are two hours of tasks in a terminal, with no multiple choice. Use these quizzes to check your understanding, and spend most of your time typing <code>kubectl</code>.
+    </div>
+  </section>
+
+  <div class="home-foot">
+    <span>Scores are stored only in this browser.</span>
+    <button class="btn quiet" id="reset" type="button">Clear my scores</button>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function () {
+  var S = window.Study, p = S.loadProgress(), T = S.TOPICS;
+  var svg = document.getElementById('dial'), NS = 'http://www.w3.org/2000/svg';
+  var cx = 200, cy = 200, r = 140, gap = 2.2, mastered = 0, firstOpen = null;
+
+  function pt(angle, rad) { var a = (angle - 90) * Math.PI / 180; return [cx + rad * Math.cos(a), cy + rad * Math.sin(a)]; }
+  function el(name, attrs, parent) { var e = document.createElementNS(NS, name); for (var k in attrs) e.setAttribute(k, attrs[k]); (parent || svg).appendChild(e); return e; }
+
+  /* inner helm: hub ring and seven spokes */
+  el('circle', { cx: cx, cy: cy, r: 98, 'class': 'hub' });
+  for (var s = 0; s < 7; s++) {
+    var a1 = pt(s * 360 / 7, 98), a2 = pt(s * 360 / 7, 112);
+    el('line', { x1: a1[0], y1: a1[1], x2: a2[0], y2: a2[1], 'class': 'spoke' });
+  }
+
+  var list = document.getElementById('list');
+  T.forEach(function (t, i) {
+    var rec = p[t.id], best = rec ? rec.best : null, b = S.band(best);
+    if (best !== null && best >= 80) mastered++;
+    if (firstOpen === null && (best === null || best < 80)) firstOpen = i;
+
+    /* dial segment */
+    var start = i * 30 + gap, end = (i + 1) * 30 - gap, p1 = pt(start, r), p2 = pt(end, r);
+    var link = el('a', { href: t.file, 'aria-label': 'Topic ' + (i + 1) + ': ' + t.title + (best === null ? ', not taken' : ', best ' + best + '%') });
+    el('title', {}, link).textContent = (i + 1) + '. ' + t.title + (best === null ? '' : ' (' + best + '%)');
+    el('path', { d: 'M' + p1[0] + ' ' + p1[1] + ' A' + r + ' ' + r + ' 0 0 1 ' + p2[0] + ' ' + p2[1], 'class': 'seg ' + (b === 'none' ? 'empty' : b) }, link);
+    var np = pt(i * 30 + 15, r + 32);
+    el('text', { x: np[0], y: np[1] + 4.5, 'text-anchor': 'middle', 'class': 'num' }).textContent = i + 1;
+
+    /* list row */
+    var li = document.createElement('li');
+    li.innerHTML = '<a href="' + t.file + '"><span class="n">' + S.pad2(i + 1) + '</span>' +
+      '<span class="t"><strong>' + S.esc(t.title) + '</strong><span class="chips">' + S.chips(t.exams) + '</span></span>' +
+      '<span class="bar-m" aria-hidden="true"><span class="' + b + '" style="width:' + (best || 0) + '%"></span></span>' +
+      '<span class="s"><span class="score-text ' + b + '">' + (best === null ? 'Not taken' : best + '%') + '</span></span></a>';
+    list.appendChild(li);
+  });
+
+  el('text', { x: cx, y: cy + 8, 'text-anchor': 'middle', 'class': 'c-big' }).textContent = mastered + '/' + T.length;
+  el('text', { x: cx, y: cy + 36, 'text-anchor': 'middle', 'class': 'c-small' }).textContent = 'topics mastered';
+
+  var cont = document.getElementById('continue');
+  if (firstOpen === null) { cont.href = 'mock-exam.html'; cont.textContent = 'Take the mock exam'; }
+  else if (Object.keys(p).length) { cont.href = T[firstOpen].file; cont.textContent = 'Continue with topic ' + (firstOpen + 1); }
+
+  if (p.mock) document.getElementById('summary').textContent = 'Mock exam best score: ' + p.mock.best + '% over ' + p.mock.attempts + ' attempt' + (p.mock.attempts > 1 ? 's' : '') + '.';
+
+  document.getElementById('reset').addEventListener('click', function () {
+    if (confirm('Clear every saved quiz score in this browser?')) { S.resetProgress(); location.reload(); }
+  });
+})();
+</script>
+</body>
+</html>

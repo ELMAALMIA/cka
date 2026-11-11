@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Services, Ingress &amp; NetworkPolicy | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="networking">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>Services, Ingress &amp; NetworkPolicy</h1>
+  <p class="lead">From Pod IP to the outside world: Services, DNS, Ingress, the Gateway API and NetworkPolicies. Related labs: 07, 08, 11, 16.</p>
+
+  <h2>Kubernetes network model</h2>
+  <ul>
+    <li>Every Pod gets its own IP; all Pods can reach all Pods without NAT. The CNI plugin makes this happen.</li>
+    <li>Pod IPs are ephemeral, so <strong>Services</strong> provide a stable virtual IP and DNS name in front of a set of Pods selected by labels.</li>
+    <li><strong>kube-proxy</strong> (iptables / IPVS / nftables mode) implements Service IPs on every node. <strong>EndpointSlices</strong> list the ready Pod IPs behind a Service.</li>
+  </ul>
+
+  <h2>Service types</h2>
+  <table>
+    <tr><th>Type</th><th>Reachable from</th><th>Notes</th></tr>
+    <tr><td><code>ClusterIP</code> (default)</td><td>Inside the cluster</td><td>Virtual IP + DNS. <code>clusterIP: None</code> = headless (DNS returns Pod IPs)</td></tr>
+    <tr><td><code>NodePort</code></td><td><code>&lt;anyNodeIP&gt;:&lt;30000-32767&gt;</code></td><td>Includes a ClusterIP. Set <code>nodePort</code> explicitly if the task gives a number</td></tr>
+    <tr><td><code>LoadBalancer</code></td><td>External IP from the cloud / MetalLB</td><td>Includes NodePort + ClusterIP. Stays <code>&lt;pending&gt;</code> without a provider</td></tr>
+    <tr><td><code>ExternalName</code></td><td>Inside</td><td>CNAME to an external DNS name, no selector, no proxying</td></tr>
+  </table>
+<pre><code>kubectl expose deployment web --name=web --port=80 --target-port=8080 --type=ClusterIP
+kubectl expose deployment web --port=80 --target-port=8080 --type=NodePort
+kubectl create service clusterip web --tcp=80:8080 --dry-run=client -o yaml
+kubectl get svc,endpointslice -l app=web
+kubectl get endpointslice -l kubernetes.io/service-name=web -o wide
+kubectl port-forward svc/web 8080:80</code></pre>
+<pre><code>apiVersion: v1
+kind: Service
+metadata: { name: web }
+spec:
+  type: NodePort
+  selector: { app: web }          # must match Pod labels, not the Deployment's
+  sessionAffinity: None            # or ClientIP
+  ports:
+    - name: http
+      port: 80                     # Service port
+      targetPort: 8080             # container port (number or port name)
+      nodePort: 30080              # optional, NodePort/LoadBalancer only
+      protocol: TCP</code></pre>
+  <div class="callout warn"><strong>No endpoints?</strong> The selector does not match the Pod labels, the <code>targetPort</code> is wrong, or the Pods are not Ready (readiness probe failing). <code>kubectl describe svc web</code> shows <code>Endpoints:</code>.</div>
+
+  <h2>DNS</h2>
+  <ul>
+    <li>Service: <code>&lt;svc&gt;.&lt;ns&gt;.svc.cluster.local</code>. From the same namespace <code>&lt;svc&gt;</code> works, from another <code>&lt;svc&gt;.&lt;ns&gt;</code>.</li>
+    <li>Pod: <code>&lt;ip-with-dashes&gt;.&lt;ns&gt;.pod.cluster.local</code> (rarely used). StatefulSet Pod: <code>&lt;pod&gt;.&lt;headless-svc&gt;.&lt;ns&gt;.svc.cluster.local</code>.</li>
+    <li>CoreDNS runs as a Deployment in <code>kube-system</code>; its Corefile is in the <code>coredns</code> ConfigMap; the Service is <code>kube-dns</code>.</li>
+    <li>Pod <code>dnsPolicy</code>: <code>ClusterFirst</code> (default), <code>Default</code> (node's resolv.conf), <code>None</code> (use <code>dnsConfig</code>), <code>ClusterFirstWithHostNet</code>.</li>
+  </ul>
+<pre><code>kubectl run dns-test --image=busybox:1.36 --rm -it --restart=Never -- nslookup web.backend.svc.cluster.local
+kubectl exec web -- cat /etc/resolv.conf
+kubectl -n kube-system logs deploy/coredns</code></pre>
+
+  <h2>Ingress</h2>
+  <p>Layer-7 HTTP(S) routing by host and path. Requires an <strong>Ingress controller</strong> (nginx, traefik, HAProxy...) and an <strong>IngressClass</strong>.</p>
+<pre><code>kubectl get ingressclass
+kubectl create ingress shop --class=nginx \
+  --rule="shop.example.com/=storefront:80" \
+  --rule="shop.example.com/api=api:8080,tls=shop-tls"
+kubectl describe ingress shop</code></pre>
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [shop.example.com]
+      secretName: shop-tls
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix              # Prefix | Exact | ImplementationSpecific
+            backend:
+              service:
+                name: storefront          # same namespace as the Ingress
+                port: { number: 80 }      # or name: http</code></pre>
+  <p>Lab 08 checklist: class name matches a controller, Service name and port exist <strong>in the same namespace</strong>, Service has endpoints, host header matches (<code>curl -H "Host: shop.example.com" http://&lt;ingress-ip&gt;/</code>).</p>
+
+  <h2>Gateway API</h2>
+  <p>The successor to Ingress, now in the CKA curriculum. Role-oriented: infra provides a <strong>GatewayClass</strong>, cluster operators create a <strong>Gateway</strong> (listeners), developers attach <strong>HTTPRoute</strong> / <strong>TCPRoute</strong> / <strong>GRPCRoute</strong> objects.</p>
+<pre><code>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: { name: web-gw }
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: shop }
+spec:
+  parentRefs: [{ name: web-gw }]
+  hostnames: ["shop.example.com"]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: /api } }]
+      backendRefs: [{ name: api, port: 8080 }]
+    - backendRefs:
+        - { name: storefront, port: 80, weight: 80 }     # weighted canary
+        - { name: storefront-canary, port: 80, weight: 20 }</code></pre>
+
+  <h2>NetworkPolicy</h2>
+  <ul>
+    <li>Namespaced firewall rules for Pods, enforced by the CNI (Calico, Cilium, Weave; <strong>not</strong> plain Flannel).</li>
+    <li>With no policy selecting a Pod, all traffic is allowed. Once any policy selects a Pod for a direction (<code>policyTypes</code>), only listed traffic in that direction is allowed. Policies are additive (union).</li>
+    <li>Peers: <code>podSelector</code>, <code>namespaceSelector</code>, <code>ipBlock</code>. <strong>Same list item = AND, separate items = OR.</strong></li>
+  </ul>
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: api-allow, namespace: backend }
+spec:
+  podSelector:
+    matchLabels: { app: api }          # {} selects every Pod in the namespace
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: web } }      # OR
+        - namespaceSelector:                              # OR: any Pod in namespaces labelled team=ops
+            matchLabels: { team: ops }
+        - namespaceSelector: { matchLabels: { env: prod } }   # AND (same item): Pods app=monitor in prod namespaces
+          podSelector: { matchLabels: { app: monitor } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: db } }
+      ports: [{ protocol: TCP, port: 5432 }]
+    - to:                                                 # allow DNS
+        - namespaceSelector: {}
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]</code></pre>
+<pre><code># default deny all ingress in a namespace
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+# default deny all ingress AND egress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]</code></pre>
+  <p>Namespaces carry the automatic label <code>kubernetes.io/metadata.name=&lt;ns&gt;</code>, handy for <code>namespaceSelector</code>. Test with <code>kubectl exec web -- wget -qO- --timeout=2 http://api:8080</code>.</p>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/networking.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

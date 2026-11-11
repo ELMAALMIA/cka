@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cluster Architecture &amp; kubectl | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="architecture">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>Cluster Architecture &amp; kubectl</h1>
+  <p class="lead">What each component does, where kubeadm puts its files, and the kubectl habits you need before anything else.</p>
+
+  <h2>Control plane components</h2>
+  <table>
+    <tr><th>Component</th><th>Job</th><th>Where (kubeadm)</th></tr>
+    <tr><td><code>kube-apiserver</code></td><td>Front door of the cluster. The only component that talks to etcd. Authenticates, authorizes, admits, validates and persists every request.</td><td>Static Pod, port 6443</td></tr>
+    <tr><td><code>etcd</code></td><td>Distributed key-value store holding all cluster state. Back it up.</td><td>Static Pod, client port 2379, peer port 2380</td></tr>
+    <tr><td><code>kube-scheduler</code></td><td>Watches for Pods with no <code>nodeName</code>, filters and scores nodes, binds the Pod.</td><td>Static Pod</td></tr>
+    <tr><td><code>kube-controller-manager</code></td><td>Runs the reconciliation loops: Deployment, ReplicaSet, Job, Node, EndpointSlice, ServiceAccount, PV binder, ...</td><td>Static Pod</td></tr>
+    <tr><td><code>cloud-controller-manager</code></td><td>Cloud-specific controllers (LoadBalancer Services, node lifecycle, routes).</td><td>Only on cloud providers</td></tr>
+  </table>
+
+  <h2>Node components</h2>
+  <ul>
+    <li><strong>kubelet</strong>: systemd service on every node. Registers the node, watches assigned Pods, calls the container runtime through the <strong>CRI</strong>, runs probes, reports status. Config: <code>/var/lib/kubelet/config.yaml</code>, identity: <code>/etc/kubernetes/kubelet.conf</code>.</li>
+    <li><strong>Container runtime</strong>: containerd or CRI-O. Inspect with <code>crictl ps -a</code>, <code>crictl logs &lt;id&gt;</code>, <code>crictl images</code>.</li>
+    <li><strong>kube-proxy</strong>: DaemonSet that programs iptables / IPVS / nftables rules so Service ClusterIPs reach backend Pods.</li>
+    <li><strong>CNI plugin</strong>: gives each Pod an IP and wires the node network. Config in <code>/etc/cni/net.d</code>, binaries in <code>/opt/cni/bin</code>. Flannel, Calico, Cilium, Weave are CNI plugins. NetworkPolicy needs a plugin that enforces it (Calico, Cilium; not plain Flannel).</li>
+    <li><strong>CoreDNS</strong>: Deployment in <code>kube-system</code> that serves cluster DNS. Config lives in the <code>coredns</code> ConfigMap.</li>
+  </ul>
+  <div class="callout">Three extension interfaces to remember: <strong>CRI</strong> (runtime), <strong>CNI</strong> (network), <strong>CSI</strong> (storage).</div>
+
+  <h2>Request flow in the API server</h2>
+  <ol>
+    <li><strong>Authentication</strong>: client certificates, bearer tokens, ServiceAccount tokens, OIDC.</li>
+    <li><strong>Authorization</strong>: RBAC (Role / ClusterRole bindings), Node, Webhook, ABAC.</li>
+    <li><strong>Admission control</strong>: mutating then validating plugins and webhooks (LimitRanger, ResourceQuota, PodSecurity, ...).</li>
+    <li>Validation and persistence in etcd, then watchers (controllers, scheduler, kubelets) react.</li>
+  </ol>
+
+  <h2>Important paths on a kubeadm node</h2>
+<pre><code>/etc/kubernetes/manifests/      # static Pods: kube-apiserver, etcd, scheduler, controller-manager
+/etc/kubernetes/pki/            # CA, API server and client certificates (etcd certs in pki/etcd/)
+/etc/kubernetes/admin.conf      # cluster-admin kubeconfig (copy to ~/.kube/config)
+/etc/kubernetes/kubelet.conf    # kubelet's kubeconfig
+/var/lib/kubelet/config.yaml    # KubeletConfiguration (staticPodPath, cgroupDriver, ...)
+/var/lib/etcd/                  # etcd data directory (hostPath of the etcd static Pod)
+/etc/cni/net.d/                 # CNI configuration
+/var/log/pods/  /var/log/containers/   # container logs on the node
+journalctl -u kubelet           # kubelet logs</code></pre>
+
+  <h2>Objects, namespaces and the API</h2>
+  <ul>
+    <li>Every object has <code>apiVersion</code>, <code>kind</code>, <code>metadata</code>, usually <code>spec</code> (desired) and <code>status</code> (observed).</li>
+    <li>API groups: <code>v1</code> (core: Pod, Service, ConfigMap, Secret, PV, PVC, Namespace, Node), <code>apps/v1</code> (Deployment, ReplicaSet, StatefulSet, DaemonSet), <code>batch/v1</code> (Job, CronJob), <code>networking.k8s.io/v1</code> (Ingress, NetworkPolicy), <code>rbac.authorization.k8s.io/v1</code>, <code>storage.k8s.io/v1</code>.</li>
+    <li>Namespaced: Pods, Deployments, Services, ConfigMaps, Secrets, PVCs, Roles. Cluster-scoped: Nodes, Namespaces, PVs, StorageClasses, ClusterRoles, CRDs.</li>
+    <li>Labels select (<code>-l app=web</code>, Service and Deployment selectors). Annotations carry metadata and are never used for selection.</li>
+  </ul>
+<pre><code>kubectl api-resources                      # kinds, short names, api group, namespaced?
+kubectl api-resources --namespaced=false
+kubectl api-versions
+kubectl explain deployment.spec.strategy --recursive
+kubectl get pod web -o yaml | less</code></pre>
+
+  <h2>kubectl and kubeconfig essentials</h2>
+<pre><code>kubectl config get-contexts
+kubectl config use-context cluster-2
+kubectl config set-context --current --namespace=team-a   # do this first in every task
+kubectl config view --minify                              # current context only
+kubectl cluster-info
+kubectl get nodes -o wide
+kubectl get all -n kube-system</code></pre>
+  <p>A kubeconfig has <strong>clusters</strong> (server URL + CA), <strong>users</strong> (cert, token) and <strong>contexts</strong> (cluster + user + namespace). <code>KUBECONFIG=a:b kubectl config view --flatten</code> merges files.</p>
+
+  <h2>Useful output formats</h2>
+<pre><code>kubectl get pods -o wide                 # node, IP
+kubectl get pods -o name                 # pod/web-1
+kubectl get pods -o jsonpath='{.items[*].metadata.name}'
+kubectl get pods -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName
+kubectl get pods --sort-by=.metadata.creationTimestamp
+kubectl get pods -A --field-selector status.phase!=Running
+kubectl get pods --show-labels -l 'env in (prod,staging)'</code></pre>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/architecture.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

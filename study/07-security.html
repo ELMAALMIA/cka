@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RBAC, ServiceAccounts &amp; Security | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="security">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · CKAD</span>
+  <h1>RBAC, ServiceAccounts &amp; Security</h1>
+  <p class="lead">Who can do what (RBAC), which identity a Pod uses (ServiceAccounts), and how to lock down a container (securityContext, Pod Security Standards). Related labs: 10, 13, 14.</p>
+
+  <h2>RBAC model</h2>
+  <ul>
+    <li><strong>Role</strong> (namespaced) and <strong>ClusterRole</strong> (cluster-wide) list rules: <code>apiGroups</code>, <code>resources</code>, <code>verbs</code>, optional <code>resourceNames</code>.</li>
+    <li><strong>RoleBinding</strong> grants a Role or ClusterRole to subjects <em>inside one namespace</em>. <strong>ClusterRoleBinding</strong> grants a ClusterRole everywhere.</li>
+    <li>Subjects: <code>User</code>, <code>Group</code>, <code>ServiceAccount</code>. RBAC is purely additive; there are no deny rules.</li>
+    <li><code>roleRef</code> is immutable; recreate the binding to change it.</li>
+  </ul>
+  <table>
+    <tr><th>Combination</th><th>Effect</th></tr>
+    <tr><td>Role + RoleBinding</td><td>Permissions in that namespace</td></tr>
+    <tr><td>ClusterRole + RoleBinding</td><td>ClusterRole's rules, but only in the RoleBinding's namespace</td></tr>
+    <tr><td>ClusterRole + ClusterRoleBinding</td><td>Rules in all namespaces + cluster-scoped resources</td></tr>
+  </table>
+<pre><code>kubectl create role pod-reader --verb=get,list,watch --resource=pods -n dev
+kubectl create rolebinding pod-reader-bind --role=pod-reader --serviceaccount=dev:inspector -n dev
+kubectl create clusterrole node-viewer --verb=get,list --resource=nodes
+kubectl create clusterrolebinding node-viewer-bind --clusterrole=node-viewer --user=jane
+kubectl create rolebinding dev-admin --clusterrole=admin --group=devs -n dev    # built-in roles: view, edit, admin, cluster-admin
+
+kubectl auth can-i list pods -n dev --as=jane
+kubectl auth can-i list pods -n dev --as=system:serviceaccount:dev:inspector
+kubectl auth can-i --list -n dev --as=system:serviceaccount:dev:inspector
+kubectl auth whoami
+kubectl describe rolebinding -n dev</code></pre>
+<pre><code>apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: deployer, namespace: dev }
+rules:
+  - apiGroups: ["apps"]                      # "" = core group (pods, services, secrets...)
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]                  # subresource
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["app-config"]            # only this object
+    verbs: ["get", "update"]</code></pre>
+
+  <h2>ServiceAccounts</h2>
+  <ul>
+    <li>Every namespace has a <code>default</code> ServiceAccount; Pods use it unless <code>serviceAccountName</code> is set. It has no RBAC permissions by default.</li>
+    <li>Tokens are short-lived and projected into <code>/var/run/secrets/kubernetes.io/serviceaccount/</code> (token, ca.crt, namespace). No more auto-created token Secrets since 1.24.</li>
+    <li><code>automountServiceAccountToken: false</code> on the SA or Pod when the app does not need the API.</li>
+  </ul>
+<pre><code>kubectl create serviceaccount inspector -n dev
+kubectl set serviceaccount deployment/web inspector -n dev      # edits the Pod template, triggers rollout
+kubectl create token inspector -n dev --duration=1h
+kubectl get deploy web -o jsonpath='{.spec.template.spec.serviceAccountName}'</code></pre>
+  <div class="callout warn"><strong>Lab 13 lesson:</strong> a Running Pod can still be failing every API call with <code>Forbidden</code>. Read the logs, compare the permissions of each ServiceAccount with <code>auth can-i</code>, and change only what the task allows.</div>
+
+  <h2>securityContext</h2>
+<pre><code>spec:
+  securityContext:                 # Pod level: applies to all containers
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000                  # group owner of mounted volumes
+    runAsNonRoot: true
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: app
+      image: nginx
+      securityContext:             # container level: overrides Pod level
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        privileged: false
+        capabilities:
+          drop: ["ALL"]
+          add: ["NET_BIND_SERVICE"]      # container level only, no CAP_ prefix</code></pre>
+<pre><code>kubectl exec app -- id                         # check uid/gid
+kubectl exec app -- grep Cap /proc/1/status    # capability bitmasks</code></pre>
+
+  <h2>Pod Security Standards (admission)</h2>
+  <ul>
+    <li>Levels: <strong>privileged</strong> (no limits), <strong>baseline</strong> (blocks known escalations: hostNetwork, privileged, hostPath...), <strong>restricted</strong> (non-root, drop ALL, seccomp, no privilege escalation).</li>
+    <li>Modes per namespace label: <code>enforce</code> (reject), <code>audit</code> (log), <code>warn</code> (kubectl warning).</li>
+  </ul>
+<pre><code>kubectl label ns prod pod-security.kubernetes.io/enforce=restricted \
+                      pod-security.kubernetes.io/warn=restricted</code></pre>
+
+  <h2>Users and certificates (CKA)</h2>
+<pre><code>openssl genrsa -out jane.key 2048
+openssl req -new -key jane.key -subj "/CN=jane/O=devs" -out jane.csr
+cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata: { name: jane }
+spec:
+  request: $(base64 -w0 jane.csr)
+  signerName: kubernetes.io/kube-apiserver-client
+  usages: ["client auth"]
+  expirationSeconds: 86400
+EOF
+kubectl certificate approve jane
+kubectl get csr jane -o jsonpath='{.status.certificate}' | base64 -d &gt; jane.crt
+kubectl config set-credentials jane --client-certificate=jane.crt --client-key=jane.key --embed-certs
+kubectl config set-context jane@k8s --cluster=kubernetes --user=jane</code></pre>
+  <p>The certificate's CN becomes the username and O the group. Inspect any certificate with <code>openssl x509 -in file.crt -noout -text</code>.</p>
+
+  <h2>Other security topics</h2>
+  <ul>
+    <li><strong>Admission controllers</strong>: enabled with <code>--enable-admission-plugins</code> on the kube-apiserver (NodeRestriction, LimitRanger, ResourceQuota, PodSecurity...). Webhooks: MutatingWebhookConfiguration, ValidatingWebhookConfiguration, ValidatingAdmissionPolicy (CEL).</li>
+    <li><strong>Secrets encryption at rest</strong>: <code>EncryptionConfiguration</code> passed with <code>--encryption-provider-config</code>.</li>
+    <li><strong>Image pull secrets</strong> and image policy: prefer pinned tags or digests.</li>
+  </ul>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/security.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

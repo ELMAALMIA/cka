@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Troubleshooting Clusters | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="troubleshoot">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA · 30% of the exam</span>
+  <h1>Troubleshooting Clusters</h1>
+  <p class="lead">Troubleshooting is the largest CKA domain. Learn to read the symptom, guess which component owns it, and know where its logs live when kubectl itself does not work.</p>
+
+  <h2>Symptom → suspect</h2>
+  <table>
+    <tr><th>Symptom</th><th>Suspect</th><th>Look at</th></tr>
+    <tr><td><code>connection refused</code> on 6443</td><td>kube-apiserver or etcd</td><td><code>crictl ps -a</code>, <code>crictl logs</code>, apiserver/etcd manifests</td></tr>
+    <tr><td>Pods Pending, no events</td><td>kube-scheduler</td><td><code>kubectl -n kube-system get pods</code>, scheduler manifest</td></tr>
+    <tr><td>Deployment scaled but no new Pods / ReplicaSets</td><td>kube-controller-manager</td><td>Its logs and manifest</td></tr>
+    <tr><td>Node <code>NotReady</code></td><td>kubelet, runtime, CNI</td><td><code>systemctl status kubelet</code>, <code>journalctl -u kubelet</code></td></tr>
+    <tr><td>Pods stuck <code>ContainerCreating</code>, CNI errors</td><td>CNI plugin</td><td>CNI DaemonSet Pods, <code>/etc/cni/net.d</code></td></tr>
+    <tr><td>Pod IP works, Service IP does not</td><td>kube-proxy or Service config</td><td>Endpoints, kube-proxy Pods and logs</td></tr>
+    <tr><td>Names do not resolve</td><td>CoreDNS</td><td>CoreDNS Pods, <code>kube-dns</code> endpoints, Corefile</td></tr>
+  </table>
+
+  <h2>Control-plane components (static Pods)</h2>
+<pre><code>kubectl -n kube-system get pods -o wide
+kubectl -n kube-system describe pod kube-apiserver-cp1
+kubectl -n kube-system logs kube-controller-manager-cp1
+
+# when the API server is down, kubectl is useless:
+sudo crictl ps -a | grep -E 'apiserver|etcd|scheduler|controller'
+sudo crictl logs &lt;container-id&gt;
+sudo ls /var/log/pods/ ; sudo tail -50 /var/log/pods/kube-system_kube-apiserver-*/kube-apiserver/*.log
+sudo vi /etc/kubernetes/manifests/kube-apiserver.yaml     # kubelet reapplies automatically</code></pre>
+  <div class="callout warn"><strong>Classic broken-cluster tricks:</strong> wrong image tag, typo in a flag name, wrong certificate path, wrong etcd endpoint or port (2379), wrong <code>--kubeconfig</code> path in the scheduler or controller-manager manifest, wrong hostPath volume. Compare with a healthy manifest and look at what is different.</div>
+  <p>Never save a backup copy <em>inside</em> <code>/etc/kubernetes/manifests</code>: the kubelet would start it as a second Pod. Copy to <code>/tmp</code> instead.</p>
+
+  <h2>Worker nodes and the kubelet</h2>
+<pre><code>kubectl get nodes
+kubectl describe node w1                          # Conditions: Ready, MemoryPressure, DiskPressure, PIDPressure
+ssh w1
+sudo systemctl status kubelet
+sudo journalctl -u kubelet -n 100 --no-pager
+sudo systemctl status containerd
+cat /var/lib/kubelet/config.yaml
+cat /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+cat /var/lib/kubelet/kubeadm-flags.env
+sudo systemctl daemon-reload &amp;&amp; sudo systemctl restart kubelet &amp;&amp; sudo systemctl enable kubelet</code></pre>
+  <ul>
+    <li>Kubelet <strong>stopped or disabled</strong>: start it and enable it so it survives reboots.</li>
+    <li>Wrong <strong>kubelet binary path</strong> in the unit file, wrong <strong>config path</strong>, wrong <strong>CA file</strong> path, wrong <strong>API server address</strong> in <code>/etc/kubernetes/kubelet.conf</code>.</li>
+    <li><strong>cgroup driver</strong> mismatch between kubelet (<code>cgroupDriver: systemd</code>) and containerd (<code>SystemdCgroup = true</code>).</li>
+    <li><strong>Swap</strong> enabled. <strong>Expired kubelet certificate</strong> in <code>/var/lib/kubelet/pki</code>.</li>
+  </ul>
+
+  <h2>Networking</h2>
+<pre><code>kubectl -n kube-system get pods -l k8s-app=kube-dns
+kubectl -n kube-system get svc kube-dns ; kubectl -n kube-system get endpointslice -l kubernetes.io/service-name=kube-dns
+kubectl -n kube-system get cm coredns -o yaml
+kubectl -n kube-system get ds kube-proxy ; kubectl -n kube-system logs ds/kube-proxy
+kubectl -n kube-system get cm kube-proxy -o yaml      # mode, clusterCIDR
+ls /etc/cni/net.d/ ; ls /opt/cni/bin/
+kubectl run t --image=busybox:1.36 --rm -it --restart=Never -- sh -c 'nslookup kubernetes.default; wget -qO- --timeout=2 http://web'</code></pre>
+  <ul>
+    <li>Check the kubelet <code>clusterDNS</code> IP equals the <code>kube-dns</code> Service ClusterIP.</li>
+    <li>CoreDNS in CrashLoopBackOff with <code>loop detected</code> means it forwards to itself. Fix the <code>forward</code> line or the node's resolv.conf.</li>
+    <li>Pod CIDR given to <code>kubeadm init</code> must match the CNI configuration.</li>
+  </ul>
+
+  <h2>Application failures</h2>
+  <p>Follow the chain from the outside in: <strong>Ingress → Service → Endpoints → Pod → container</strong>.</p>
+<pre><code>kubectl describe ingress shop                         # backend service/port exist?
+kubectl get svc web -o wide ; kubectl describe svc web    # selector, targetPort, Endpoints
+kubectl get pods -l app=web --show-labels                 # labels match the selector?
+kubectl describe pod &lt;pod&gt;                               # events
+kubectl logs &lt;pod&gt; --previous                            # crash reason
+kubectl exec -it &lt;pod&gt; -- netstat -tlnp                  # really listening on targetPort?</code></pre>
+
+  <h2>Resource monitoring</h2>
+<pre><code>kubectl top nodes ; kubectl top pods -A --sort-by=memory
+kubectl describe node w1 | sed -n '/Allocated resources/,/Events/p'
+kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp</code></pre>
+
+  <h2>A 5-step routine for any broken cluster task</h2>
+  <ol>
+    <li><code>kubectl get nodes</code> and <code>kubectl get pods -A | grep -v Running</code> to see the scope.</li>
+    <li><code>describe</code> the failing object and read the <strong>Events</strong>.</li>
+    <li>Logs: <code>kubectl logs</code>, or <code>crictl logs</code> / <code>journalctl</code> when the API is down.</li>
+    <li>Compare the config with what it should be (manifest, systemd unit, ConfigMap).</li>
+    <li>Fix one thing, wait, re-check. Verify from the API server, not from your edited file.</li>
+  </ol>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/troubleshoot.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

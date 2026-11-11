@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scheduling, Taints &amp; Affinity | K8s Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-topic="scheduling">
+<header class="top"></header>
+<main>
+<article class="lesson">
+  <span class="badge">CKA</span>
+  <h1>Scheduling, Taints &amp; Affinity</h1>
+  <p class="lead">How Pods land on nodes, how to steer them, and what to look at when they stay Pending.</p>
+
+  <h2>How the scheduler works</h2>
+  <ol>
+    <li>Watches for Pods with an empty <code>spec.nodeName</code>.</li>
+    <li><strong>Filtering</strong>: removes nodes that cannot host the Pod (resources, taints, nodeSelector, required affinity, volume topology, ports).</li>
+    <li><strong>Scoring</strong>: ranks remaining nodes (preferred affinity, spreading, image locality, least allocated).</li>
+    <li><strong>Binding</strong>: writes <code>nodeName</code>; the kubelet takes over.</li>
+  </ol>
+  <p>Set <code>spec.nodeName</code> yourself and the scheduler is bypassed entirely. Set <code>spec.schedulerName</code> to use another scheduler.</p>
+
+  <h2>nodeSelector and node affinity</h2>
+<pre><code>kubectl label nodes node2 disktype=ssd
+kubectl get nodes --show-labels</code></pre>
+<pre><code>spec:
+  nodeSelector:
+    disktype: ssd                      # simple AND of labels
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:     # hard
+        nodeSelectorTerms:
+          - matchExpressions:
+              - { key: topology.kubernetes.io/zone, operator: In, values: [eu-west-1a, eu-west-1b] }
+      preferredDuringSchedulingIgnoredDuringExecution:    # soft, weighted 1-100
+        - weight: 80
+          preference:
+            matchExpressions:
+              - { key: disktype, operator: In, values: [ssd] }</code></pre>
+  <p>Operators: <code>In</code>, <code>NotIn</code>, <code>Exists</code>, <code>DoesNotExist</code>, <code>Gt</code>, <code>Lt</code>. Multiple <code>nodeSelectorTerms</code> are ORed; expressions inside one term are ANDed.</p>
+
+  <h2>Pod affinity and anti-affinity</h2>
+<pre><code>affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels: { app: web }
+        topologyKey: kubernetes.io/hostname       # one web Pod per node
+  podAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector: { matchLabels: { app: cache } }
+          topologyKey: topology.kubernetes.io/zone  # prefer same zone as cache</code></pre>
+<pre><code>topologySpreadConstraints:               # modern way to spread evenly
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule       # or ScheduleAnyway
+    labelSelector: { matchLabels: { app: web } }</code></pre>
+
+  <h2>Taints and tolerations</h2>
+  <p>Taints live on <strong>nodes</strong> and repel Pods. Tolerations live on <strong>Pods</strong> and allow (not force) scheduling onto tainted nodes.</p>
+<pre><code>kubectl taint nodes node1 dedicated=gpu:NoSchedule        # add
+kubectl taint nodes node1 dedicated=gpu:NoSchedule-       # remove (trailing dash)
+kubectl describe node node1 | grep -i taints
+kubectl taint nodes --all node-role.kubernetes.io/control-plane-   # allow workloads on control plane</code></pre>
+  <table>
+    <tr><th>Effect</th><th>New Pods</th><th>Running Pods</th></tr>
+    <tr><td><code>NoSchedule</code></td><td>Blocked unless tolerated</td><td>Untouched</td></tr>
+    <tr><td><code>PreferNoSchedule</code></td><td>Avoided if possible</td><td>Untouched</td></tr>
+    <tr><td><code>NoExecute</code></td><td>Blocked</td><td>Evicted unless tolerated (optionally after <code>tolerationSeconds</code>)</td></tr>
+  </table>
+<pre><code>tolerations:
+  - key: dedicated
+    operator: Equal          # Equal needs value; Exists does not
+    value: gpu
+    effect: NoSchedule
+  - key: node.kubernetes.io/not-ready
+    operator: Exists
+    effect: NoExecute
+    tolerationSeconds: 60    # default is 300 for not-ready / unreachable</code></pre>
+  <div class="callout">Pattern for dedicated nodes: taint the node <strong>and</strong> add a nodeSelector/affinity on the Pod. The taint keeps others out; the selector keeps your Pod in.</div>
+
+  <h2>Static Pods</h2>
+  <ul>
+    <li>Created by the kubelet from files in <code>staticPodPath</code> (<code>/etc/kubernetes/manifests</code>). Find the path in <code>/var/lib/kubelet/config.yaml</code>.</li>
+    <li>The API server shows a read-only <strong>mirror Pod</strong> named <code>&lt;name&gt;-&lt;nodename&gt;</code>. Deleting it with kubectl is useless; move or delete the file on the node.</li>
+    <li>Control-plane components on kubeadm are static Pods. A typo in their manifest is a classic troubleshooting task.</li>
+  </ul>
+<pre><code>kubectl run static-web --image=nginx --dry-run=client -o yaml | sudo tee /etc/kubernetes/manifests/static-web.yaml
+sudo systemctl restart kubelet     # usually not needed, the kubelet watches the directory</code></pre>
+
+  <h2>Priority and preemption</h2>
+<pre><code>apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: high }
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority     # or Never
+description: "Critical services"
+---
+# in the Pod spec
+spec:
+  priorityClassName: high</code></pre>
+
+  <h2>Node maintenance</h2>
+<pre><code>kubectl cordon node1                                   # SchedulingDisabled, nothing new lands
+kubectl drain node1 --ignore-daemonsets --delete-emptydir-data --force   # evict everything
+# ... upgrade / reboot ...
+kubectl uncordon node1</code></pre>
+  <p><code>--force</code> is needed for Pods without a controller (bare Pods). PodDisruptionBudgets can block a drain; check with <code>kubectl get pdb -A</code>.</p>
+
+  <h2>Why is my Pod Pending?</h2>
+<pre><code>kubectl describe pod web | sed -n '/Events/,$p'</code></pre>
+  <ul>
+    <li><code>Insufficient cpu/memory</code> → lower requests or add capacity.</li>
+    <li><code>node(s) had untolerated taint</code> → add a toleration or remove the taint.</li>
+    <li><code>didn't match Pod's node affinity/selector</code> → fix labels.</li>
+    <li><code>unbound immediate PersistentVolumeClaims</code> → PVC is Pending (see Storage).</li>
+    <li>No events at all → the scheduler itself is down (<code>kubectl -n kube-system get pods</code>).</li>
+  </ul>
+</article>
+
+<section class="quiz-wrap" id="quiz-section">
+  <h2>QCM — test yourself</h2>
+  <p class="muted">Single-answer questions use radio buttons. Questions marked "select all that apply" need every correct box ticked.</p>
+  <div id="quiz"></div>
+</section>
+</main>
+<footer class="bottom"></footer>
+<script src="questions/scheduling.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
